@@ -2,7 +2,8 @@ import argparse
 import collections
 import torch
 import numpy as np
-import data_loader.data_loaders as module_data
+import data_loader.data_loaders as module_dataloader
+import data_loader.datasets as module_dataset
 import model.loss as module_loss
 import model.metric as module_metric
 import model.model as module_arch
@@ -24,8 +25,10 @@ def main(config):
     logger = config.get_logger('train')
     
     # setup data_loader instances
-    data_loader = config.init_obj('data_loader', module_data)
-    valid_data_loader = data_loader.split_validation()
+    cluster_loader = config.init_obj('cluster_loader', module_dataloader)
+    train_loader = config.init_obj('train_loader', module_dataloader)
+    
+    ## 0629 여기까지! loader 설계완료
     
     # build model architecture, then print to console
     model = config.init_obj('arch', module_arch)

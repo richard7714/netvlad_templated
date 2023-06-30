@@ -4,7 +4,6 @@ import pandas as pd
 from pathlib import Path
 from itertools import repeat
 from collections import OrderedDict
-import sys
 
 def ensure_dir(dirname):
     dirname = Path(dirname)

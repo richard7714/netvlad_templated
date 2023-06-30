@@ -10,27 +10,15 @@
             "encoder_dim" : 512
         }
     },
-    "cluster_loader": {
-        "type": "ClusterLoader",
+    "data_loader": {
+        "type": "MnistDataLoader",
         "args":{
-            "structFile" : "/home/ma/git/learning/netvlad_templated/csv/train_dataset.csv",
+            "data_dir": "data/",
             "batch_size": 128,
             "shuffle": true,
+            "validation_split": 0.1,
             "num_workers": 2,
-            "validation_split":0.0
-        }
-    },
-    "train_loader": {
-        "type": "TrainLoader",
-        "args":{
-            "structFile" : "/home/ma/git/learning/netvlad_templated/csv/train_dataset.csv",
-            "margin" : 0.1,
-            "nNegSample": 1000,
-            "nNeg" : 10,
-            "batch_size": 128,
-            "shuffle": true,
-            "num_workers": 2,
-            "validation_split": 0.0
+            "cuda": true
         }
     },
     "optimizer": {
@@ -59,6 +47,7 @@
         "save_period": 1,
         "verbosity": 2,
         
+        "margin" : 0.1,
         "cachePath": "./cache",
         "monitor": "min val_loss",
         "early_stop": 10,

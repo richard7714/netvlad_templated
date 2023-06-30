@@ -3,7 +3,6 @@ from torch.utils.data import DataLoader
 from torch.utils.data.dataloader import default_collate
 from torch.utils.data.sampler import SubsetRandomSampler
 
-
 class BaseDataLoader(DataLoader):
     """
     Base class for all data loaders
@@ -22,7 +21,8 @@ class BaseDataLoader(DataLoader):
             'batch_size': batch_size,
             'shuffle': self.shuffle,
             'collate_fn': collate_fn,
-            'num_workers': num_workers
+            'num_workers': num_workers,
+            # 'pin_memory' : pin_memory
         }
         super().__init__(sampler=self.sampler, **self.init_kwargs)
 
