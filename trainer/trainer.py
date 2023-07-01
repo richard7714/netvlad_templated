@@ -10,13 +10,16 @@ import sys
 import h5py
 import os 
 from tqdm import tqdm
+import faiss
+from PIL import Image
+from torchvision.transforms import ToTensor
 
 class Trainer(BaseTrainer):
     """
     Trainer class
     """
     def __init__(self, model, criterion, metric_ftns, optimizer, config, device, cluster_loader,
-                 train_loader, valid_data_loader=None, lr_scheduler=None, len_epoch=None):
+                 train_loader, vaild_loader=None, lr_scheduler=None, len_epoch=None):
         super().__init__(model, criterion, metric_ftns, optimizer, config)
         self.config = config
         self.device = device
@@ -32,8 +35,8 @@ class Trainer(BaseTrainer):
             # iteration-based training
             self.train_loader = inf_loop(train_loader)
             self.len_epoch = len_epoch
-        self.valid_data_loader = valid_data_loader
-        self.do_validation = self.valid_data_loader is not None
+        self.vaild_loader = vaild_loader
+        self.do_validation = self.vaild_loader is not None
         self.lr_scheduler = lr_scheduler
         self.log_step = int(np.sqrt(train_loader.batch_size))
         self.margin = self.loader_args["margin"]
@@ -222,8 +225,8 @@ class Trainer(BaseTrainer):
         #     # output metric 출력
             # log.update(**{'val_'+k : v for k, v in val_log.items()})
 
-        # if self.lr_scheduler is not None:
-        #     self.lr_scheduler.step()
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
         return log
 
     def _valid_epoch(self, epoch):
@@ -234,19 +237,75 @@ class Trainer(BaseTrainer):
         :return: A log that contains information about validation
         """
         self.model.eval()
-        self.valid_metrics.reset()
+        eval_set = self.vaild_loader.get_dataset()
+        # self.valid_metrics.reset()
         with torch.no_grad():
-            for batch_idx, (data, target) in enumerate(self.valid_data_loader):
-                data, target = data.to(self.device), target.to(self.device)
+            print('====> Extracting Features')
+            pool_size = self.pool_args["dim"]
+            if self.config["type"].lower() == "netvlad" : pool_size *= self.pool_args["num_clusters"]
+            dbFeat = np.empty((len(eval_set),pool_size))
+            
+            for iteration, (input, indices) in enumerate(self.vaild_loader, 1):
+                
+                input = input.to(self.device)
 
-                output = self.model(data)
-                loss = self.criterion(output, target)
-
-                self.writer.set_step((epoch - 1) * len(self.valid_data_loader) + batch_idx, 'valid')
-                self.valid_metrics.update('loss', loss.item())
-                for met in self.metric_ftns:
-                    self.valid_metrics.update(met.__name__, met(output, target))
-                self.writer.add_image('input', make_grid(data.cpu(), nrow=8, normalize=True))
+                image_encoding = self.model.encoder(input)
+                vlad_encoding = self.model.pool(image_encoding)
+                
+                dbFeat[indices.detach().numpy(),:] = vlad_encoding.detach().cpu().numpy()
+                
+                del input, image_encoding, vlad_encoding
+            del self.vaild_loader
+            
+            # extracted for both db and query, now split in own sets
+            qFeat = dbFeat[eval_set.dbStruct.numDb:].astype('float32')
+            dbFeat = dbFeat[:eval_set.dbStruct.numDb].astype('float32')
+                
+            print('====> Building faiss index')
+            faiss_index = faiss.IndexFlatL2(pool_size)
+            faiss_index.add(dbFeat)
+            
+            print('====> Calculating recall @ N')
+            n_values = [1, 5, 10, 20]
+            
+            _, predictions = faiss_index.search(qFeat, max(n_values))
+            
+            # for each query get those within threshold distance
+            gt = eval_set.getPositives()
+            
+            correct_at_n = np.zeros(len(n_values))
+            
+            for qIx, pred in enumerate(predictions):
+                for i,n in enumerate(n_values):
+                    compare = np.in1d(pred[:n], gt[qIx])
+                    if np.any(compare):
+                        correct_at_n[i:] += 1
+                        break
+                    else:
+                        idx = np.where(compare == False)[0][0]
+                        # TODO to be replaced into flag
+                        if True:
+                            query_img = Image.open(eval_set.dbStruct.qImage[qIx])
+                            self.writer.add_image(str(epoch)+'_query_img',ToTensor()(query_img), qIx)
+                            q_img = Image.open(eval_set.dbStruct.dbImage[predictions[qIx,idx]])
+                            self.writer.add_image(str(epoch)+'_answer',ToTensor()(q_img),qIx)
+                        break
+            
+            recall_at_n = correct_at_n / eval_set.dbStruct.numQ
+            
+            recalls = {}
+            for i,n in enumerate(n_values):
+                recalls[n] = recall_at_n[i]
+                print("====> Recall@{}: {:.4f}".format(n, recall_at_n[i]))
+                if True:
+                    self.writer.add_scalar('Val/Recall@' + str(n), recall_at_n[i], epoch)
+            
+            return recalls
+            # self.writer.set_step((epoch - 1) * len(self.vaild_loader) + batch_idx, 'valid')
+            # self.valid_metrics.update('loss', loss.item())
+            # for met in self.metric_ftns:
+            #     self.valid_metrics.update(met.__name__, met(output, target))
+            # self.writer.add_image('input', make_grid(data.cpu(), nrow=8, normalize=True))
 
         # add histogram of model parameters to the tensorboard
         # model 내 layer별 파라미터 기록

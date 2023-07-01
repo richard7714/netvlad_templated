@@ -51,3 +51,17 @@ class TrainLoader(BaseDataLoader):
         
     def __len__(self):
         return len(self.dataset)
+
+class VaildLoader(BaseDataLoader):
+    def __init__(self,structFile,cacheBatchSize, shuffle,num_workers,validation_split,pin_memory):
+
+        self.dataset = get_whole_val_set(structFile)
+        
+        super().__init__(dataset=self.dataset,batch_size=cacheBatchSize,shuffle=shuffle,
+                         num_workers=num_workers,validation_split=validation_split,pin_memory=pin_memory)
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def get_dataset(self):
+        return self.dataset
