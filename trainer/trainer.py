@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from torchvision.utils import make_grid
+from math import ceil
 from base import BaseTrainer
 from utils import inf_loop, MetricTracker, collate_fn
 from torch.utils.data import DataLoader, SubsetRandomSampler
@@ -8,40 +9,51 @@ from torch.utils.data.dataset import Subset
 import sys
 import h5py
 import os 
+from tqdm import tqdm
 
 class Trainer(BaseTrainer):
     """
     Trainer class
     """
     def __init__(self, model, criterion, metric_ftns, optimizer, config, device, cluster_loader,
-                 data_loader, valid_data_loader=None, lr_scheduler=None, len_epoch=None):
-        criterion = criterion(margin=config["trainer"]["margin"]**0.5)
+                 train_loader, valid_data_loader=None, lr_scheduler=None, len_epoch=None):
         super().__init__(model, criterion, metric_ftns, optimizer, config)
         self.config = config
         self.device = device
         self.cluster_loader = cluster_loader
-        self.data_loader = data_loader
-        self.loader_args = config['data_loader']['args']
-        self.arch_args = config["arch"]["args"]
+        self.train_loader = train_loader
+        self.loader_args = config['train_loader']['args']
+        self.pool_args = config["pool"]["args"]
         self.train_args = config["trainer"]
         if len_epoch is None:
             # epoch-based training
-            self.len_epoch = len(self.data_loader)
+            self.len_epoch = len(self.train_loader)
         else:
             # iteration-based training
-            self.data_loader = inf_loop(data_loader)
+            self.train_loader = inf_loop(train_loader)
             self.len_epoch = len_epoch
         self.valid_data_loader = valid_data_loader
         self.do_validation = self.valid_data_loader is not None
         self.lr_scheduler = lr_scheduler
-        self.log_step = int(np.sqrt(data_loader.batch_size))
+        self.log_step = int(np.sqrt(train_loader.batch_size))
+        self.margin = self.loader_args["margin"]
         
         # self.metric_ftns => metric functions list        
         self.train_metrics = MetricTracker('loss', *[m.__name__ for m in self.metric_ftns], writer=self.writer)
         self.valid_metrics = MetricTracker('loss', *[m.__name__ for m in self.metric_ftns], writer=self.writer)
 
+        initcache = os.path.join('centroids', config["dataset"]+'_'+str(self.pool_args["num_clusters"])+'_desc_cen.hdf5')
+        
+        with h5py.File(initcache, mode='r') as h5:
+            clsts = h5.get("centroids")[...]
+            traindescs = h5.get("descriptors")[...]
+            self.model.pool.init_params(clsts, traindescs)
+            self.model.pool.to(device)
+            del clsts, traindescs
+
     def _train_epoch(self, epoch):
         epoch_loss = 0
+        startIter = 1
         """
         Training logic for an epoch
 
@@ -59,130 +71,142 @@ class Trainer(BaseTrainer):
         
         # train metric 초기화
         self.train_metrics.reset()
-        
-        # subsetN = 1
-        # subsetIdx = [np.arange(self.len_epoch)]
-        
-        nBatches = (self.len_epoch + self.data_loader.batch_size -1) // self.data_loader.batch_size
-        
-        # for subIter in range(subsetN):
-        print("===> Building Cache")
-        self.model.eval()
-        train_set_cache = os.path.join(self.train_args["cachePath"], self.config["mode"] + "_feat_cache.hdf5")
-        with h5py.File(train_set_cache, mode='w') as h5:
-            pool_size = self.arch_args["encoder_dim"]
-            
-            if self.config["arch"]["type"] == 'NetVLAD': pool_size *= self.arch_args["num_clusters"]
-            
-            # create h5 dataset to store features
-            h5feat = h5.create_dataset("features",
-                    [len(self.data_loader), pool_size],
-                    dtype=np.float32)
-            
-            # push features into h5 dataset
-            with torch.no_grad():
-                for iteration, (input, indices) in enumerate(self.cluster_loader, 1):
-                    
-                    input = input.to(self.device)
-                    
-                    image_encoding = self.model.encoder(input)
-                    
-                    vlad_encoding = self.model.pool(image_encoding)
-                    
-                    h5feat[indices.detach().numpy(), :] = vlad_encoding.detach().cpu().numpy()
-                    
-                    del input, image_encoding, vlad_encoding
-        
-        # TODO train_set과 whole_train_set의 차이를 알아야할듯
-        # => get_whole_training_set과 get_training_query_set의 차이를 알면 된다.
-        # => WholeDatasetFromStruct vs QueryDatasetFromStruct
-        # WholeDataset은 h5feat cluster를 생성하기 위해 사용
-        # 리턴시 image만을 return, positive
-        # train_set이 실제 train을 위한 데이터셋
-        # sub_train_set = Subset(dataset=train_set, indices=subsetIdx[subIter])
 
-        ### 06/26
-        # training_data_loader = DataLoader(dataset=sub_train_set, num_workers=self.loader_args["num_workers"],
-        #             batch_size=self.loader_args["batch_size"], shuffle=self.loader_args["shuffle"],
-        #             collate_fn=collate_fn, pin_memory=self.loader_args["cuda"])
+        if self.train_args["cacheRefreshRate"] > 0:
+            # split train set into subsets
+            subsetN = ceil(len(self.cluster_loader)/ self.train_args["cacheRefreshRate"])
+            
+            # split indices into subsets
+            subsetIdx = np.array_split(np.arange(len(self.cluster_loader)),subsetN)
+        else:
+            subsetN = 1
+            subsetIdx = [np.arange(len(self.cluster_loader))]
         
-        training_data_loader = self.data_loader
+        # iterate over subsets
+        nBatches = (self.len_epoch + self.loader_args["batch_size"]-1) // self.loader_args["batch_size"]
         
-        print('Allocated:', torch.cuda.memory_allocated())
-        print('Cached:', torch.cuda.memory_cached())
-        
-        self.model.train()
-        
-        # data => 데이터, target => GT
-        for iteration, (query, positives, negatives,
-                negCounts, indices) in enumerate(training_data_loader, startIter):
+        for subIter in range(subsetN):
+            print("===> Building Cache")
+            self.model.eval()
+            train_set_cache = os.path.join(self.train_args["cachePath"], self.config["mode"] + "_feat_cache.hdf5")
+            with h5py.File(train_set_cache, mode='w') as h5:
+                pool_size = self.pool_args["dim"]
+                
+                if self.config["pool"]["type"] == 'NetVLAD': pool_size *= self.pool_args["num_clusters"]
+                
+                # create h5 dataset to store features
+                h5feat = h5.create_dataset("features",
+                        [len(self.cluster_loader), pool_size],
+                        dtype=np.float32)
+                
+                # push features into h5 dataset
+                with torch.no_grad():
+                    for iteration, (input, indices) in enumerate(self.cluster_loader, 1):
+                        
+                        input = input.to(self.device)
+                                                
+                        image_encoding = self.model.encoder(input)
+                                                
+                        vlad_encoding = self.model.pool(image_encoding)                        
+                        
+                        h5feat[indices.detach().numpy(), :] = vlad_encoding.detach().cpu().numpy()
+                        
+                        del input, image_encoding, vlad_encoding
+                                
             
-            if query is None: continue
-            
-            B, C, H, W = query.shape
-            
-            # negCounts는 각 query에 대한 negative의 개수를 나타내는 list
-            # nNeg는 negative의 총 개수
-            nNeg = torch.sum(negCounts)
-            input = torch.cat([query, positives, negatives])
-            
-            input = input.to(self.device)
-            image_encoding = self.model.encoder(input)
-            vlad_encoding = self.model.pool(image_encoding)
+            # TODO train_set과 whole_train_set의 차이를 알아야할듯
+            # => get_whole_training_set과 get_training_query_set의 차이를 알면 된다.
+            # => WholeDatasetFromStruct vs QueryDatasetFromStruct
+            # WholeDataset은 h5feat cluster를 생성하기 위해 사용
+            # 리턴시 image만을 return, positive
+            # train_set이 실제 train을 위한 데이터셋
+            # sub_train_set = Subset(dataset=train_set, indices=subsetIdx[subIter])
 
-            # split vlad encoding into query, positive, negative                
-            vladQ, vladP, vladN = torch.split(vlad_encoding, [B, B, nNeg])
+            ### 06/26
+            # training_data_loader = DataLoader(dataset=sub_train_set, num_workers=self.loader_args["num_workers"],
+            #             batch_size=self.loader_args["batch_size"], shuffle=self.loader_args["shuffle"],
+            #             collate_fn=collate_fn, pin_memory=self.loader_args["cuda"])
             
-            self.optimizer.zero_grad()
+            training_data_loader = self.train_loader
             
-            # loss 계산 & 파라미터 조정
-            # 각각의 query, positive, negative triplet에 대해 loss를 계산
-            # TODO
-            # negative의 개수가 달라질 수 있기 때문에(?) query, negative 마다 loss를 계산해야 한다.
-            loss = 0
+            print('Allocated:', torch.cuda.memory_allocated())
+            print('Cached:', torch.cuda.memory_cached())
             
-            for i, negCount in enumerate(negCounts):
-                for n in range(negCount):
-                    negIx = (torch.sum(negCounts[:i])+n).item()
-                    loss += self.criterion(vladQ[i:i+1], vladP[i:i+1], vladN[negIx:negIx+1])
+            self.model.train()
             
-            # normalize by actual number of negatives
-            loss /= nNeg.float().to(self.device)
-            loss.backward()
-            self.optimizer.step()
-            del input, image_encoding, vlad_encoding, vladQ, vladP, vladN
-            del query, positives, negatives
-            
-            batch_loss = loss.item()
-            epoch_loss += batch_loss
-            
-            # TODO
-            # # steps_per_sec 기록
-            # self.writer.set_step((epoch - 1) * self.len_epoch + iteration)
-            
-            # # writer에 'loss'라는 이름으로 loss 값 기록
-            # self.train_metrics.update('batch_loss', loss.item())
-            
-            # # metric_ftns에 담긴 met 각각에 대해 값 계산 후 기록
-            # for met in self.metric_ftns:
-            #     self.train_metrics.update(met.__name__, met(output, target))
+            # data => 데이터, target => GT
+            # for iteration, (query, positives, negatives,
+            #         negCounts, indices) in enumerate(training_data_loader, startIter):
 
-            # # logger로 loss 출력 및 image 기록
-            # if batch_idx % self.log_step == 0:
-            #     self.logger.debug('Train Epoch: {} {} Loss: {:.6f}'.format(
-            #         epoch,
-            #         self._progress(batch_idx),
-            #         loss.item()))
-            #     # self.writer.add_image('input', make_grid(data.cpu(), nrow=8, normalize=True))
+            for iteration, (query, positives, negatives,
+                    negCounts,indices) in enumerate(training_data_loader, startIter):
 
-            # if batch_idx == self.len_epoch:
-            #     break
+                if query is None: continue
+                
+                B, C, H, W = query.shape                       
+                                                
+                # negCounts는 각 query에 대한 negative의 개수를 나타내는 list
+                # nNeg는 negative의 총 개수
+                nNeg = torch.sum(negCounts)
+                input = torch.cat([query, positives, negatives])
+                
+                input = input.to(self.device)
+                image_encoding = self.model.encoder(input)
+                vlad_encoding = self.model.pool(image_encoding)
 
-        startIter += len(self.data_loader)
-        del self.data_loader, loss
+                # split vlad encoding into query, positive, negative                
+                vladQ, vladP, vladN = torch.split(vlad_encoding, [B, B, nNeg])
+                
+                self.optimizer.zero_grad()
+                
+                # loss 계산 & 파라미터 조정
+                # 각각의 query, positive, negative triplet에 대해 loss를 계산
+                # TODO
+                # negative의 개수가 달라질 수 있기 때문에(?) query, negative 마다 loss를 계산해야 한다.
+                loss = 0
+                
+                for i, negCount in enumerate(negCounts):
+                    for n in range(negCount):
+                        negIx = (torch.sum(negCounts[:i])+n).item()
+                        loss += self.criterion(vladQ[i:i+1], vladP[i:i+1], vladN[negIx:negIx+1],self.margin)
+                
+                # normalize by actual number of negatives
+                loss /= nNeg.float().to(self.device)
+                loss.backward()
+                self.optimizer.step()
+                del input, image_encoding, vlad_encoding, vladQ, vladP, vladN
+                del query, positives, negatives
+                
+                batch_loss = loss.item()
+                epoch_loss += batch_loss
+                
+                # TODO
+                # # steps_per_sec 기록
+                # self.writer.set_step((epoch - 1) * self.len_epoch + iteration)
+                
+                # # writer에 'loss'라는 이름으로 loss 값 기록
+                # self.train_metrics.update('batch_loss', loss.item())
+                
+                # # metric_ftns에 담긴 met 각각에 대해 값 계산 후 기록
+                # for met in self.metric_ftns:
+                #     self.train_metrics.update(met.__name__, met(output, target))
+
+                # # logger로 loss 출력 및 image 기록
+                # if batch_idx % self.log_step == 0:
+                #     self.logger.debug('Train Epoch: {} {} Loss: {:.6f}'.format(
+                #         epoch,
+                #         self._progress(batch_idx),
+                #         loss.item()))
+                #     # self.writer.add_image('input', make_grid(data.cpu(), nrow=8, normalize=True))
+
+                # if batch_idx == self.len_epoch:
+                #     break
+
+        startIter += len(training_data_loader)
+        del training_data_loader, loss
         self.optimizer.zero_grad()
         torch.cuda.empty_cache()
-        os.remove(train_set_cache) # delete HDF5 cache
+        # os.remove(train_set_cache) # delete HDF5 cache
     
         avg_loss = epoch_loss / nBatches
         
@@ -190,16 +214,17 @@ class Trainer(BaseTrainer):
                 flush=True)
                     
         # # {'loss': 0.658925260342128, 'accuracy': 0.7893587085308057, 'top_k_acc': 0.9289205314827352}            
-        # log = self.train_metrics.result()
-
+        log = self.train_metrics.result()
+        log = {"loss" : avg_loss}
+        # log = avg_loss
         # if self.do_validation:
         #     val_log = self._valid_epoch(epoch)
         #     # output metric 출력
-        #     log.update(**{'val_'+k : v for k, v in val_log.items()})
+            # log.update(**{'val_'+k : v for k, v in val_log.items()})
 
         # if self.lr_scheduler is not None:
         #     self.lr_scheduler.step()
-        # return log
+        return log
 
     def _valid_epoch(self, epoch):
         """

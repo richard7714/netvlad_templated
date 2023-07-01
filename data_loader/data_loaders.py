@@ -26,24 +26,28 @@ DataLoader()에서 전달하는 args만 받아서 전달하면 될듯
 """
 
 class ClusterLoader(BaseDataLoader):
-    def __init__(self,structFile,batch_size, shuffle,num_workers,validation_split):
+    def __init__(self,structFile,cacheBatchSize, shuffle,num_workers,validation_split,pin_memory):
 
         self.dataset = get_whole_training_set(structFile,False)
-        self.num_workers = num_workers
-        self.batch_size = batch_size
-        self.shuffle = shuffle
         
-        super().__init__(dataset=self.dataset,batch_size=self.batch_size,shuffle=self.shuffle,
-                         collate_fn=data.dataloader.default_collate,num_workers=self.num_workers,validation_split=validation_split)
-
+        super().__init__(dataset=self.dataset,batch_size=cacheBatchSize,shuffle=shuffle,
+                         num_workers=num_workers,validation_split=validation_split,pin_memory=pin_memory)
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def get_dataset(self):
+        return self.dataset
+    
 class TrainLoader(BaseDataLoader):
-    def __init__(self,structFile,margin,nNegSample,nNeg,batch_size, shuffle,num_workers,validation_split):
+    def __init__(self,structFile,margin,nNegSample,nNeg,batch_size, shuffle,num_workers,validation_split,pin_memory):
 
         self.dataset = get_training_query_set(structFile,margin,nNegSample,nNeg)
-        self.num_workers = num_workers
-        self.batch_size = batch_size
-        self.shuffle = shuffle
         
-        super().__init__(dataset=self.dataset,batch_size=self.batch_size,shuffle=self.shuffle,
-                         collate_fn=data.dataloader.default_collate,num_workers=self.num_workers,validation_split=validation_split)
-    
+        super().__init__(dataset=self.dataset,batch_size=batch_size,shuffle=shuffle,
+                         collate_fn=collate_fn,
+                         num_workers=num_workers,
+                         validation_split=validation_split,pin_memory=pin_memory)
+        
+    def __len__(self):
+        return len(self.dataset)

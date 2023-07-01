@@ -2,22 +2,34 @@
     "name": "Mnist_LeNet",
     "n_gpu": 1,
     "mode" : "train",
+    "dataset" : "sthereo",
 
-    "arch": {
+    "encoder": {
+        "type": "ResNet34",
+        "args": {
+            "pretrained": true
+        }
+    },
+
+    "pool": {
         "type": "NetVLAD",
         "args": {
             "num_clusters" : 64,
-            "encoder_dim" : 512
+            "dim" : 512,
+            "normalize_input" : true,
+            "vladv2" : false
         }
     },
+
     "cluster_loader": {
         "type": "ClusterLoader",
         "args":{
             "structFile" : "/home/ma/git/learning/netvlad_templated/csv/train_dataset.csv",
-            "batch_size": 128,
-            "shuffle": true,
-            "num_workers": 2,
-            "validation_split":0.0
+            "cacheBatchSize": 24,
+            "shuffle": false,
+            "num_workers": 8,
+            "validation_split":0.0,
+            "pin_memory" : true
         }
     },
     "train_loader": {
@@ -29,8 +41,9 @@
             "nNeg" : 10,
             "batch_size": 128,
             "shuffle": true,
-            "num_workers": 2,
-            "validation_split": 0.0
+            "num_workers": 8,
+            "validation_split": 0.0,
+            "pin_memory" : true
         }
     },
     "optimizer": {
@@ -41,7 +54,7 @@
             "amsgrad": true
         }
     },
-    "loss": "nll_loss",
+    "loss": "triplet_loss",
     "metrics": [
         "accuracy", "top_k_acc"
     ],
@@ -59,6 +72,7 @@
         "save_period": 1,
         "verbosity": 2,
         
+        "cacheRefreshRate" : 1000,
         "cachePath": "./cache",
         "monitor": "min val_loss",
         "early_stop": 10,

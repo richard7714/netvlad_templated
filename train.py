@@ -9,7 +9,9 @@ import model.metric as module_metric
 import model.model as module_arch
 from parse_config import ConfigParser
 from trainer import Trainer
-from utils import prepare_device
+from utils import prepare_device, get_clusters
+from torchinfo import summary
+import torch.nn as nn
 
 # for debug
 import sys
@@ -22,16 +24,25 @@ torch.backends.cudnn.benchmark = False
 np.random.seed(SEED)
 
 def main(config):
+    
+    mode = config["mode"]
+    
     logger = config.get_logger('train')
     
     # setup data_loader instances
     cluster_loader = config.init_obj('cluster_loader', module_dataloader)
     train_loader = config.init_obj('train_loader', module_dataloader)
-    
+
     ## 0629 여기까지! loader 설계완료
     
     # build model architecture, then print to console
-    model = config.init_obj('arch', module_arch)
+    encoder = config.init_obj('encoder', module_arch)
+    pool = config.init_obj('pool',module_arch)
+    
+    model = nn.Module()
+    model.add_module('encoder',encoder)
+    model.add_module('pool',pool)
+    
     logger.info(model)
     
     # prepare for (multi-device) GPU training
@@ -54,14 +65,18 @@ def main(config):
     optimizer = config.init_obj('optimizer', torch.optim, trainable_params)
     lr_scheduler = config.init_obj('lr_scheduler', torch.optim.lr_scheduler, optimizer)
 
-    trainer = Trainer(model, criterion, metrics, optimizer,
+    if mode == "cluster":
+        get_clusters(model,cluster_loader.get_dataset(),config)
+    elif mode == "train":
+        trainer = Trainer(model, criterion, metrics, optimizer,
                       config=config,
                       device=device,
-                      data_loader=data_loader,
-                      valid_data_loader=valid_data_loader,
+                      cluster_loader= cluster_loader,
+                      train_loader=train_loader,
+                    #   valid_data_loader=valid_data_loader,
                       lr_scheduler=lr_scheduler)
 
-    trainer.train()
+        trainer.train()
 
 
 if __name__ == '__main__':

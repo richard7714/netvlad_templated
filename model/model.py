@@ -2,6 +2,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from base import BaseModel
 import torch
+import torchvision.models as models
+import numpy as np
+from sklearn.neighbors import NearestNeighbors
 
 class MnistModel(BaseModel):
     def __init__(self, num_classes=10):
@@ -21,12 +24,30 @@ class MnistModel(BaseModel):
         x = self.fc2(x)
         return F.log_softmax(x, dim=1)
 
+class ResNet34(BaseModel):
+    def __init__(self,pretrained):
+        super().__init__()
+        
+        resnet = models.resnet34(pretrained=pretrained)
+        layers = list(resnet.children())[:-2]
+        
+        if pretrained:
+            for l in layers[:-2]:
+                for p in l.parameters():
+                    p.requires_grad = False
+
+        self.encoder = nn.Sequential(*layers)
+    
+    def forward(self, x):
+        return self.encoder(x)
+        
+        
 # based on https://github.com/lyakaap/NetVLAD-pytorch/blob/master/netvlad.py
 class NetVLAD(BaseModel):
     """NetVLAD layer implementation"""
     
     def __init__(self, num_clusters=64, dim=128,
-                 normalize_input=True, vladv2=False):
+                normalize_input=True, vladv2=False):
         
         """
         Args:
@@ -55,8 +76,8 @@ class NetVLAD(BaseModel):
         
         # TODO
         if self.vladv2 == False:
-            clstAssign = clsts / np.linalg.norm(clsts, axis=1, keepdims=True)
-            dots = np.dot(clstAssign, traindescs.T)
+            clstsAssign = clsts / np.linalg.norm(clsts, axis=1, keepdims=True)
+            dots = np.dot(clstsAssign, traindescs.T)
             dots.sort(0)
             dots = dots[::-1,:]
             
@@ -66,7 +87,7 @@ class NetVLAD(BaseModel):
             self.conv.bias = None
         else:
             # cluster 만드는 부분인듯?
-            knn = NearestNeighbors(n_jobs=-1)
+            knn = NearestNeighbors(n_jobs=1)
             knn.fit(traindescs)
             del traindescs
             dsSq = np.square(knn.kneighbors(clsts,2)[1])
@@ -83,6 +104,7 @@ class NetVLAD(BaseModel):
             )
     
     def forward(self, x):
+        
         N, C = x.shape[:2]
         
         if self.normalize_input:

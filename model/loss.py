@@ -6,8 +6,11 @@ import torch.nn as nn
 def nll_loss(output, target):
     return F.nll_loss(output, target)
 
-def triplet_loss(output, target):
-    criterion = nn.TripletMarginLoss(margin=0.1**0.5,
+def triplet_loss(anchor,positive,negative,margin):
+    criterion = nn.TripletMarginLoss(margin=margin**0.5,
                 p = 2, reduction='sum')
-    return criterion
+    
+    loss = criterion(anchor,positive,negative)
+    
+    return loss
     

@@ -2,7 +2,10 @@ import torch
 import torchvision.transforms as transforms
 import torch.utils.data as data
 
+from math import ceil
+from torch.utils.data import DataLoader, SubsetRandomSampler
 from os.path import join, exists
+from os import makedirs
 from scipy.io import loadmat
 import numpy as np
 from random import randint, random
@@ -14,6 +17,8 @@ import pandas as pd
 from sklearn.neighbors import NearestNeighbors
 import h5py
 
+import faiss
+import os
 import sys
 
 def collate_fn(batch):
@@ -50,6 +55,7 @@ def torch_cat(negs,dim):
 def input_transform():
     return transforms.Compose([
         transforms.ToTensor(),
+        transforms.Resize((640,480)),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225]),
     ])
@@ -79,14 +85,15 @@ def parse_dbStruct(path):
 
     whichSet = "train"
 
-    dbImage = np.array([row.split(',') for row in database["db_image"]])
+    dbImage = [row for row in database["db_image"]]
+        
     utmDb = np.array([database["db_pose_x"].astype(float).tolist(),database["db_pose_y"].astype(float).tolist()])
     utmDb = utmDb.T
     
     numDb = database["dbNum"][0].astype(int)
     numQ = database["qNum"][0].astype(int)
     
-    qImage = np.array([row.split(',') for row in database["q_image"] if isinstance(row, str)])
+    qImage = [row for row in database["q_image"] if isinstance(row, str)]
     utmQ = np.array([database["q_pose_x"][:numQ].astype(float).tolist(),database["q_pose_y"][:numQ].astype(float).tolist()])
     utmQ = utmQ.T
     
@@ -109,10 +116,10 @@ class WholeDatasetFromStruct(data.Dataset):
         self.input_transform = input_transform
         
         self.dbStruct = parse_dbStruct(structFile)
-        self.images = [dbIm for dbIm in self.dbStruct.dbImage[:,0] if isinstance(dbIm, str)]
+        self.images = [dbIm for dbIm in self.dbStruct.dbImage if isinstance(dbIm, str)]
         if not onlyDB:
-            self.images += [qIm for qIm in self.dbStruct.qImage[:,0] if isinstance(qIm, str)]
-
+            self.images += [qIm for qIm in self.dbStruct.qImage if isinstance(qIm, str)]
+                
         self.whichSet = self.dbStruct.whichSet
         self.dataset = self.dbStruct.dataset
 
@@ -183,7 +190,7 @@ class QueryDatasetFromStruct(data.Dataset):
             self.potential_negatives.append(np.setdiff1d(np.arange(self.dbStruct.numDb),
                 pos, assume_unique=True))
         
-        self.cache = None # filepath of HDF5 containing feature vectors for images
+        self.cache = "./cache/train_feat_cache.hdf5" # filepath of HDF5 containing feature vectors for images
         
         self.negCache = [np.empty((0,)) for _ in range(self.dbStruct.numQ)]
         
@@ -224,7 +231,7 @@ class QueryDatasetFromStruct(data.Dataset):
             negNN = negNN[violatingNeg][:self.nNeg]
             negIndices = negSample[negNN].astype(np.int32)
             self.negCache[index] = negIndices
-            
+        
         query = Image.open(self.dbStruct.qImage[index])
         positive = Image.open(self.dbStruct.dbImage[posIndex])
             
@@ -245,3 +252,59 @@ class QueryDatasetFromStruct(data.Dataset):
     
     def __len__(self):
         return len(self.queries)
+    
+def get_clusters(model,cluster_set,config):
+    nDescriptors = 50000
+    nPerImage = 100
+    nIm = ceil(nDescriptors/nPerImage)
+    cluster_args = config["cluster_loader"]["args"]
+    device = "cuda" if config["n_gpu"] > 0 else "cpu"
+    encoder_dim = config["pool"]["args"]["dim"]
+    num_clusters = config["pool"]["args"]["num_clusters"]
+        
+    sampler = SubsetRandomSampler(np.random.choice(len(cluster_set), nIm, replace=False))
+    data_loader = DataLoader(dataset=cluster_set, 
+                num_workers=cluster_args["num_workers"], batch_size=cluster_args["cacheBatchSize"], shuffle=cluster_args["shuffle"], 
+                pin_memory=cluster_args["pin_memory"],
+                sampler=sampler)
+
+    if not exists('centroids'):
+        makedirs('centroids')
+    
+    initcache = join('centroids', cluster_set.dataset + '_' + str(num_clusters) + '_desc_cen.hdf5')
+    with h5py.File(initcache, mode='w') as h5: 
+        with torch.no_grad():
+            model.eval()
+            print('====> Extracting Descriptors')
+            dbFeat = h5.create_dataset("descriptors", 
+                        [nDescriptors, encoder_dim], 
+                        dtype=np.float32)
+
+            for iteration, (input, indices) in enumerate(data_loader, 1):
+                
+                input = input.to(device)
+
+                input = input.float()
+                                                    
+                image_descriptors = model.encoder(input).view(input.size(0), encoder_dim, -1).permute(0, 2, 1)
+                
+                batchix = (iteration-1)*cluster_args["cacheBatchSize"]*nPerImage
+                for ix in range(image_descriptors.size(0)):
+                    # sample different location for each image in batch
+                    sample = np.random.choice(image_descriptors.size(1), nPerImage, replace=False)
+                    startix = batchix + ix*nPerImage
+                    dbFeat[startix:startix+nPerImage, :] = image_descriptors[ix, sample, :].detach().cpu().numpy()
+
+                if iteration % 50 == 0 or len(data_loader) <= 10:
+                    print("==> Batch ({}/{})".format(iteration, 
+                        ceil(nIm/cluster_args["cacheBatchSize"])), flush=True)
+                del input, image_descriptors
+        
+        print('====> Clustering..')
+        niter = 100
+        kmeans = faiss.Kmeans(encoder_dim, num_clusters, niter=niter, verbose=False)
+        kmeans.train(dbFeat[...])
+
+        print('====> Storing centroids', kmeans.centroids.shape)
+        h5.create_dataset('centroids', data=kmeans.centroids)
+        print('====> Done!')
