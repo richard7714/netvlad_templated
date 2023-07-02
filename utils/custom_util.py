@@ -65,8 +65,8 @@ def get_whole_training_set(structFile,onlyDB=False):
                                   input_transform=input_transform(),
                                   onlyDB=onlyDB)
     
-def get_whole_val_set(structFile,*train_args):
-    return WholeDatasetFromStruct(structFile,train_args,
+def get_whole_val_set(structFile):
+    return WholeDatasetFromStruct(structFile,
                              input_transform=input_transform())
 
 def get_training_query_set(structFile,*train_args):
@@ -99,7 +99,7 @@ def parse_dbStruct(path):
     
     posDistThr = database["thres"][0].astype(float)
     posDistSqThr = database["sqthres"][0].astype(float)
-    nonTrivPosDistSqThr = 100
+    nonTrivPosDistSqThr = 10
 
     dbStruct = namedtuple('dbStruct', ['whichSet', 'dataset', 
     'dbImage', 'utmDb', 'qImage', 'utmQ', 'numDb', 'numQ',

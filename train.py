@@ -32,7 +32,7 @@ def main(config):
     # setup data_loader instances
     cluster_loader = config.init_obj('cluster_loader', module_dataloader)
     train_loader = config.init_obj('train_loader', module_dataloader)
-    vaild_loader = config.init_obj('test_loader',module_dataloader)
+    valid_loader = config.init_obj('valid_loader',module_dataloader)
     
     ## 0629 여기까지! loader 설계완료
     
@@ -74,11 +74,11 @@ def main(config):
                       device=device,
                       cluster_loader= cluster_loader,
                       train_loader=train_loader,
-                      valid_loader=vaild_loader,
+                      valid_loader=valid_loader,
                       lr_scheduler=lr_scheduler)
 
         trainer.train()
-    ## 0701 vaildation을 어떻게 선정해야할지?
+    ## 0701 validation을 어떻게 선정해야할지?
 
 if __name__ == '__main__':
     args = argparse.ArgumentParser(description='PyTorch Template')

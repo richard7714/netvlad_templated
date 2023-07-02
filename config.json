@@ -24,7 +24,7 @@
     "cluster_loader": {
         "type": "ClusterLoader",
         "args":{
-            "structFile" : "/home/ma/git/learning/netvlad_templated/csv/train_dataset.csv",
+            "structFile" : "/home/ma/git/learning/netvlad_templated/csv/train_dataset_full.csv",
             "cacheBatchSize": 24,
             "shuffle": false,
             "num_workers": 8,
@@ -35,7 +35,7 @@
     "train_loader": {
         "type": "TrainLoader",
         "args":{
-            "structFile" : "/home/ma/git/learning/netvlad_templated/csv/train_dataset.csv",
+            "structFile" : "/home/ma/git/learning/netvlad_templated/csv/train_dataset_full.csv",
             "margin" : 0.1,
             "nNegSample": 1000,
             "nNeg" : 10,
@@ -46,10 +46,10 @@
             "pin_memory" : true
         }
     },
-    "vaild_loader": {
-        "type": "VaildLoader",
+    "valid_loader": {
+        "type": "validLoader",
         "args":{
-            "structFile" : "/home/ma/git/learning/netvlad_templated/csv/val_dataset.csv",
+            "structFile" : "/home/ma/git/learning/netvlad_templated/csv/val_dataset_full.csv",
             "cacheBatchSize": 24,
             "shuffle": false,
             "num_workers": 8,
